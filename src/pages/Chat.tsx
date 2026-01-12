@@ -1,10 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ChatHeader } from '../components/chat/ChatHeader';
 import { ChatBubble } from '../components/chat/ChatBubble';
 import { ChatOption } from '../components/chat/ChatOption';
 import { ChatInput } from '../components/chat/ChatInput';
 import { useQueue } from '../context/QueueContext';
-import { QueueClient } from '../data/mockData';
+import { Barber, QueueClient } from '../data/mockData';
 
 type ChatStep =
   | 'welcome'
@@ -12,14 +12,16 @@ type ChatStep =
   | 'confirm-join'
   | 'select-notification'
   | 'enter-phone'
-  | 'verify-phone'
   | 'enter-email'
+  | 'verify-code'
+  | 'duplicate-confirm'
   | 'check-start'
   | 'check-phone'
   | 'check-email'
   | 'leave-start'
   | 'leave-phone'
   | 'leave-email'
+  | 'leave-confirm'
   | 'joined-success'
   | 'cancelled';
 
@@ -54,10 +56,21 @@ const Chat: React.FC = () => {
   const [selectedBarber, setSelectedBarber] = useState<string | null>(null);
   const [clientPhone, setClientPhone] = useState<string>('');
   const [clientEmail, setClientEmail] = useState<string>('');
+  const [joinMethod, setJoinMethod] = useState<'phone' | 'email' | null>(null);
+  const [joinedClientId, setJoinedClientId] = useState<string | null>(null);
+  const [verificationCode, setVerificationCode] = useState<string | null>(null);
+  const [verificationMethod, setVerificationMethod] = useState<'phone' | 'email' | null>(null);
+  const [verificationTarget, setVerificationTarget] = useState<string>('');
+  const [pendingJoinContact, setPendingJoinContact] = useState<{
+    method: 'phone' | 'email';
+    value: string;
+  } | null>(null);
+  const [pendingLeaveMatches, setPendingLeaveMatches] = useState<QueueClient[]>([]);
   const [showInput, setShowInput] = useState(false);
   const [inputType, setInputType] = useState<'tel' | 'email' | 'text'>('text');
   const [inputPlaceholder, setInputPlaceholder] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const didInitRef = useRef(false);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -68,6 +81,8 @@ const Chat: React.FC = () => {
   }, [messages]);
 
   useEffect(() => {
+    if (didInitRef.current) return;
+    didInitRef.current = true;
     showWelcomeOptions();
   }, []);
 
@@ -90,9 +105,38 @@ const Chat: React.FC = () => {
     setMessages(prev => [...prev, newMessage]);
   };
 
-  const showWelcomeOptions = () => {
+  const sendVerificationCode = (method: 'phone' | 'email', destination: string) => {
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    setVerificationMethod(method);
+    setVerificationTarget(destination);
+    setVerificationCode(code);
+    console.info(`Verification code for ${method} ${destination}: ${code}`);
+    return code;
+  };
+
+  const formatJoinMethod = (method: 'phone' | 'email') =>
+    method === 'phone' ? 'phone number' : 'email';
+
+  const startVerification = (method: 'phone' | 'email', value: string) => {
+    const code = sendVerificationCode(method, value);
+    if (method === 'phone') {
+      setClientPhone(value);
+    } else {
+      setClientEmail(value);
+    }
+    setJoinMethod(method);
     addBotMessage(
-      `Welcome to ${salon.name}!\n\nHow can we help you today?`,
+      `We've sent a 6-digit code to ${value}.\n\nEnter it below to confirm.\n\nDemo code: ${code}`
+    );
+    setShowInput(true);
+    setInputType('tel');
+    setInputPlaceholder('6-digit code');
+    setStep('verify-code');
+  };
+
+  const showWelcomeOptions = (intro?: string) => {
+    addBotMessage(
+      intro ?? `Welcome to ${salon.name}!\n\nHow can we help you today?`,
       [
         { label: 'Get a haircut', value: 'haircut' },
         { label: 'Plait or braid hair', value: 'plait' },
@@ -101,6 +145,27 @@ const Chat: React.FC = () => {
       ]
     );
     setStep('welcome');
+  };
+
+  const handleInputCancel = () => {
+    setShowInput(false);
+    setInputType('text');
+    setInputPlaceholder('');
+    setPendingJoinContact(null);
+    setPendingLeaveMatches([]);
+
+    if (step === 'enter-phone' || step === 'enter-email' || step === 'verify-code') {
+      setClientPhone('');
+      setClientEmail('');
+      setVerificationCode(null);
+      setVerificationMethod(null);
+      setVerificationTarget('');
+      if (!joinedClientId) {
+        setJoinMethod(null);
+      }
+    }
+
+    showWelcomeOptions('No problem. What would you like to do next?');
   };
 
   const handleOptionClick = (value: string, label: string) => {
@@ -130,9 +195,14 @@ const Chat: React.FC = () => {
             const queueCount = getQueueCount(value);
 
             addBotMessage(
-              `Great choice! ${barber?.name} is ready for you.\n\n` +
-                `Current wait: ~${waitTime} minutes\n` +
-                `People in queue: ${queueCount}\n\n` +
+              `Great choice! ${barber?.name} is ready for you.
+
+` +
+                `Current wait: ~${waitTime} minutes
+` +
+                `People in queue: ${queueCount}
+
+` +
                 `Would you like to join the queue?`,
               [
                 { label: 'Yes, join the queue', value: 'join' },
@@ -178,17 +248,70 @@ const Chat: React.FC = () => {
           }
           break;
 
-        case 'verify-phone':
-          if (value === 'verified') {
-            completeQueueJoin();
-          } else if (value === 'resend') {
-            addBotMessage("A new code has been sent. Tap 'Verified' once you have it.", [
-              { label: 'Verified', value: 'verified' }
-            ]);
+        case 'verify-code':
+          if (value === 'resend-code') {
+            if (!verificationMethod || !verificationTarget) {
+              addBotMessage('We need your contact details first.', [
+                { label: 'Start over', value: 'restart' }
+              ]);
+              setStep('cancelled');
+              return;
+            }
+            const code = sendVerificationCode(verificationMethod, verificationTarget);
+            addBotMessage(
+              `A new code has been sent to ${verificationTarget}.
+
+Enter it below to continue.
+
+Demo code: ${code}`
+            );
+            setShowInput(true);
+            setInputType('tel');
+            setInputPlaceholder('6-digit code');
+            setStep('verify-code');
+          } else if (value === 'restart') {
+            resetChat();
+          }
+          break;
+
+        case 'duplicate-confirm':
+          if (!pendingJoinContact) {
+            showWelcomeOptions();
+            break;
+          }
+          if (value === 'duplicate-join') {
+            const { method, value: contactValue } = pendingJoinContact;
+            setPendingJoinContact(null);
+            startVerification(method, contactValue);
+          } else if (value === 'duplicate-check') {
+            const { method, value: contactValue } = pendingJoinContact;
+            setPendingJoinContact(null);
+            handleCheckPositionLookup(contactValue, method);
+          } else if (value === 'never-mind') {
+            setPendingJoinContact(null);
+            showWelcomeOptions('No problem. What would you like to do next?');
           }
           break;
 
         case 'check-start':
+          if (value === 'back') {
+            showWelcomeOptions();
+            return;
+          }
+          if (joinMethod && value !== joinMethod) {
+            addBotMessage(
+              `Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`,
+              [
+                {
+                  label: joinMethod === 'phone' ? 'Use phone number' : 'Use email',
+                  value: joinMethod
+                },
+                { label: 'Go back', value: 'back' }
+              ]
+            );
+            setStep('check-start');
+            return;
+          }
           if (value === 'phone') {
             addBotMessage('Enter the phone number you used:');
             setShowInput(true);
@@ -207,6 +330,24 @@ const Chat: React.FC = () => {
           break;
 
         case 'leave-start':
+          if (value === 'back') {
+            showWelcomeOptions();
+            return;
+          }
+          if (joinMethod && value !== joinMethod) {
+            addBotMessage(
+              `Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`,
+              [
+                {
+                  label: joinMethod === 'phone' ? 'Use phone number' : 'Use email',
+                  value: joinMethod
+                },
+                { label: 'Go back', value: 'back' }
+              ]
+            );
+            setStep('leave-start');
+            return;
+          }
           if (value === 'phone') {
             addBotMessage('Enter the phone number you used:');
             setShowInput(true);
@@ -224,10 +365,45 @@ const Chat: React.FC = () => {
           }
           break;
 
+        case 'leave-confirm':
+          if (value === 'confirm-leave') {
+            if (pendingLeaveMatches.length > 0) {
+              confirmLeaveMatches();
+            } else {
+              handleLeaveCurrentQueue();
+            }
+          } else if (value === 'never-mind') {
+            if (pendingLeaveMatches.length > 0) {
+              setPendingLeaveMatches([]);
+              addBotMessage("No problem. You're still in the queue.", [
+                { label: 'Start over', value: 'restart' }
+              ]);
+              setStep('cancelled');
+            } else {
+              addBotMessage("No problem. You're still in the queue.", [
+                { label: 'Leave the queue', value: 'leave-queue' },
+                { label: 'Start over', value: 'restart' }
+              ]);
+              setStep('joined-success');
+            }
+          }
+          break;
+
         case 'cancelled':
         case 'joined-success':
           if (value === 'restart') {
             resetChat();
+          } else if (value === 'leave-queue') {
+            setPendingLeaveMatches([]);
+            if (joinedClientId) {
+              addBotMessage('Are you sure you want to leave the queue?', [
+                { label: 'Yes, leave the queue', value: 'confirm-leave' },
+                { label: 'Never mind', value: 'never-mind' }
+              ]);
+              setStep('leave-confirm');
+            } else {
+              promptForLookup('leave');
+            }
           }
           break;
       }
@@ -235,16 +411,33 @@ const Chat: React.FC = () => {
   };
 
   const promptForLookup = (mode: 'check' | 'leave') => {
-    addBotMessage(
+    if (mode === 'leave') {
+      setPendingLeaveMatches([]);
+    }
+    const base =
       mode === 'check'
         ? 'How would you like to look up your spot in line?'
-        : 'How would you like to find your queue entry?',
-      [
-        { label: 'Use phone number', value: 'phone' },
-        { label: 'Use email', value: 'email' },
-        { label: 'Go back', value: 'back' }
-      ]
-    );
+        : 'How would you like to find your queue entry?';
+    const hint = joinMethod
+      ? `
+
+Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
+      : '';
+    const options = joinMethod
+      ? [
+          {
+            label: joinMethod === 'phone' ? 'Use phone number' : 'Use email',
+            value: joinMethod
+          },
+          { label: 'Go back', value: 'back' }
+        ]
+      : [
+          { label: 'Use phone number', value: 'phone' },
+          { label: 'Use email', value: 'email' },
+          { label: 'Go back', value: 'back' }
+        ];
+
+    addBotMessage(`${base}${hint}`, options);
     setStep(mode === 'check' ? 'check-start' : 'leave-start');
   };
 
@@ -255,17 +448,38 @@ const Chat: React.FC = () => {
     setSelectedBarber(null);
     setClientPhone('');
     setClientEmail('');
+    setJoinMethod(null);
+    setJoinedClientId(null);
+    setVerificationCode(null);
+    setVerificationMethod(null);
+    setVerificationTarget('');
+    setPendingJoinContact(null);
+    setPendingLeaveMatches([]);
+    setShowInput(false);
     showWelcomeOptions();
   };
 
+  const barberSupportsService = (barber: Barber, service: QueueClient['service']) =>
+    !barber.services || barber.services.includes(service);
+
   const showBarberSelection = (service: QueueClient['service']) => {
-    const availableBarbers = barbers.filter(b => b.isAvailable);
+    const serviceLabel = service === 'haircut' ? 'a haircut' : 'plaiting';
+    const registeredBarbers = barbers.filter(b => barberSupportsService(b, service));
+    const availableBarbers = registeredBarbers.filter(b => b.isAvailable);
+
+    if (registeredBarbers.length === 0) {
+      addBotMessage(`Sorry, there is no one registered to provide ${serviceLabel} right now.`, [
+        { label: 'Go back', value: 'back' }
+      ]);
+      setStep('select-barber');
+      return;
+    }
 
     if (availableBarbers.length === 0) {
-      addBotMessage(
-        'Sorry, no barbers are available at the moment. Please check back later!',
-        [{ label: 'Start over', value: 'restart' }]
-      );
+      addBotMessage(`Sorry, no barbers are available for ${serviceLabel} right now.`, [
+        { label: 'Go back', value: 'back' }
+      ]);
+      setStep('select-barber');
       return;
     }
 
@@ -276,7 +490,9 @@ const Chat: React.FC = () => {
     }));
 
     addBotMessage(
-      `Here are our available barbers for ${service === 'haircut' ? 'a haircut' : 'plaiting'}:\n\n` +
+      `Here are our available barbers for ${serviceLabel}:
+
+` +
         `Please select who you'd like to see:`,
       [...barberOptions, { label: 'Go back', value: 'back' }]
     );
@@ -288,22 +504,46 @@ const Chat: React.FC = () => {
     setShowInput(false);
 
     setTimeout(() => {
-      if (step === 'enter-phone') {
-        setClientPhone(value);
-        addBotMessage(
-          `We've sent a verification code to ${value}.\n\nFor this demo, tap "Verified" to continue.`,
-          [
-            { label: 'Verified', value: 'verified' },
-            { label: 'Resend code', value: 'resend' }
-          ]
-        );
-        setStep('verify-phone');
-      } else if (step === 'enter-email') {
-        setClientEmail(value);
-        addBotMessage(
-          `We've sent a verification link to ${value}.\n\nFor this demo, your email is confirmed!`
-        );
-        setTimeout(() => completeQueueJoin(), 1000);
+      if (step === 'enter-phone' || step === 'enter-email') {
+        const method: 'phone' | 'email' = step === 'enter-phone' ? 'phone' : 'email';
+        const matches = findMatches(value, method);
+        if (matches.length > 0) {
+          const contactLabel = method === 'phone' ? 'phone number' : 'email';
+          setPendingJoinContact({ method, value });
+          addBotMessage(
+            `That ${contactLabel} is already on the waiting list. Would you like to join again for someone else?`,
+            [
+              { label: 'Yes, join for someone else', value: 'duplicate-join' },
+              { label: 'No, check my position', value: 'duplicate-check' },
+              { label: 'Never mind', value: 'never-mind' }
+            ]
+          );
+          setStep('duplicate-confirm');
+          return;
+        }
+        startVerification(method, value);
+      } else if (step === 'verify-code') {
+        const sanitized = value.replace(/\D/g, '');
+        if (!verificationCode) {
+          addBotMessage('We need to send you a code first.', [
+            { label: 'Resend code', value: 'resend-code' },
+            { label: 'Start over', value: 'restart' }
+          ]);
+          setStep('verify-code');
+          return;
+        }
+        if (sanitized !== verificationCode) {
+          addBotMessage("That code doesn't match. Try again or request a new one.", [
+            { label: 'Resend code', value: 'resend-code' },
+            { label: 'Start over', value: 'restart' }
+          ]);
+          setShowInput(true);
+          setInputType('tel');
+          setInputPlaceholder('6-digit code');
+          setStep('verify-code');
+          return;
+        }
+        completeQueueJoin();
       } else if (step === 'check-phone' || step === 'check-email') {
         handleCheckPosition(value);
       } else if (step === 'leave-phone' || step === 'leave-email') {
@@ -325,8 +565,7 @@ const Chat: React.FC = () => {
     );
   };
 
-  const handleCheckPosition = (value: string) => {
-    const kind = step === 'check-phone' ? 'phone' : 'email';
+  const handleCheckPositionLookup = (value: string, kind: 'phone' | 'email') => {
     const matches = findMatches(value, kind);
 
     if (matches.length === 0) {
@@ -338,7 +577,7 @@ const Chat: React.FC = () => {
       return;
     }
 
-    const summaries = matches.map(match => {
+    const details = matches.map(match => {
       const barber = barbers.find(b => b.id === match.barberId);
       const activeQueue = queue
         .filter(client => client.barberId === match.barberId && isActiveClient(client))
@@ -348,15 +587,35 @@ const Chat: React.FC = () => {
         5,
         Math.round((match.estimatedTime.getTime() - Date.now()) / 60000)
       );
-      return `Barber: ${barber?.name ?? 'Unknown'} | Position: #${position} | Est wait: ~${waitMinutes} min`;
+      return {
+        barberName: barber?.name ?? 'Unknown',
+        position,
+        waitMinutes
+      };
     });
+
+    const summaries = details.map(
+      detail =>
+        `Barber: ${detail.barberName} | Position: #${detail.position} | Est wait: ~${detail.waitMinutes} min`
+    );
+    const shouldHeadToShop = details.some(
+      detail => detail.waitMinutes < 50 || detail.position === 3
+    );
+    const headNote = shouldHeadToShop
+      ? `\n\nIt's almost your turn. Start heading to the shop at ${salon.address}, ${salon.city}.`
+      : '';
 
     addBotMessage(
       `Here is your latest queue status:\n\n${summaries.join('\n')}\n\n` +
-        `We will notify you about 45 minutes before your turn.`,
+        `We will notify you about 45 minutes before your turn.${headNote}`,
       [{ label: 'Start over', value: 'restart' }]
     );
     setStep('cancelled');
+  };
+
+  const handleCheckPosition = (value: string) => {
+    const kind = step === 'check-phone' ? 'phone' : 'email';
+    handleCheckPositionLookup(value, kind);
   };
 
   const handleLeaveQueue = (value: string) => {
@@ -371,13 +630,50 @@ const Chat: React.FC = () => {
       setStep('cancelled');
       return;
     }
+    setPendingLeaveMatches(matches);
+    const entryLabel = matches.length === 1 ? 'entry' : 'entries';
+    addBotMessage(`We found ${matches.length} active queue ${entryLabel}. Leave the queue?`, [
+      { label: 'Yes, leave the queue', value: 'confirm-leave' },
+      { label: 'Never mind', value: 'never-mind' }
+    ]);
+    setStep('leave-confirm');
+  };
 
-    matches.forEach(match => removeClient(match.id));
+  const confirmLeaveMatches = () => {
+    if (pendingLeaveMatches.length === 0) {
+      addBotMessage("We couldn't find your queue entry.", [
+        { label: 'Start over', value: 'restart' }
+      ]);
+      setStep('cancelled');
+      return;
+    }
+
+    pendingLeaveMatches.forEach(match => removeClient(match.id));
+    setPendingLeaveMatches([]);
 
     addBotMessage(
       "Sorry to see you go! We'll be here when you're ready.\n\nThanks for stopping by.",
       [{ label: 'Start over', value: 'restart' }]
     );
+    setStep('cancelled');
+  };
+
+  const handleLeaveCurrentQueue = () => {
+    if (!joinedClientId) {
+      addBotMessage("We couldn't find your queue entry.", [
+        { label: 'Start over', value: 'restart' }
+      ]);
+      setStep('cancelled');
+      return;
+    }
+
+    removeClient(joinedClientId);
+    setJoinedClientId(null);
+    setPendingLeaveMatches([]);
+
+    addBotMessage("You've been removed from the queue. See you next time!", [
+      { label: 'Start over', value: 'restart' }
+    ]);
     setStep('cancelled');
   };
 
@@ -405,19 +701,44 @@ const Chat: React.FC = () => {
       service: selectedService
     };
     addToQueue(newClient);
+    setJoinedClientId(newClient.id);
+    setVerificationCode(null);
+    setVerificationMethod(null);
+    setVerificationTarget('');
+    setPendingJoinContact(null);
 
     addBotMessage(
-      `You're in the queue!\n\n` +
-        `Barber: ${barber?.name}\n` +
-        `Service: ${selectedService === 'haircut' ? 'Haircut' : 'Plaiting'}\n` +
-        `Position: #${queuePosition}\n` +
-        `Estimated wait: ~${waitTime} minutes\n\n` +
-        `We'll notify you 45 minutes before your turn.\n\n` +
+      `You're in the queue!
+
+` +
+        `Barber: ${barber?.name}
+` +
+        `Service: ${selectedService === 'haircut' ? 'Haircut' : 'Plaiting'}
+` +
+        `Position: #${queuePosition}
+` +
+        `Estimated wait: ~${waitTime} minutes
+
+` +
+        `We'll notify you 45 minutes before your turn.
+
+` +
         `Address: ${salon.address}, ${salon.city}`,
-      [{ label: 'Start over', value: 'restart' }]
+      [
+        { label: 'Leave the queue', value: 'leave-queue' },
+        { label: 'Start over', value: 'restart' }
+      ]
     );
     setStep('joined-success');
   };
+
+  const latestOptionsMessageId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].options?.length) return messages[i].id;
+    }
+    return null;
+  }, [messages]);
+  const latestMessageId = messages[messages.length - 1]?.id ?? null;
 
   return (
     <div className="min-h-screen bg-white">
@@ -435,6 +756,11 @@ const Chat: React.FC = () => {
                     label={option.label}
                     sublabel={option.sublabel}
                     variant={option.sublabel ? 'barber' : 'default'}
+                    disabled={
+                      showInput
+                        ? message.id !== latestMessageId
+                        : message.id !== latestOptionsMessageId
+                    }
                     onClick={() => handleOptionClick(option.value, option.label)}
                   />
                 ))}
@@ -450,6 +776,7 @@ const Chat: React.FC = () => {
         type={inputType}
         placeholder={inputPlaceholder}
         onSubmit={handleInputSubmit}
+        onCancel={handleInputCancel}
       />
     </div>
   );

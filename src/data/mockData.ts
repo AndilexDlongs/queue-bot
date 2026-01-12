@@ -1,5 +1,7 @@
 export type QueueStatus = 'waiting' | 'accepted' | 'in-service' | 'done' | 'declined' | 'left';
 
+export type Service = 'haircut' | 'plait';
+
 export interface Salon {
   id: string;
   name: string;
@@ -26,6 +28,7 @@ export interface Barber {
   lunchStart: string;
   lunchDurationMinutes: number;
   averageCutMinutes: number;
+  services?: Service[];
   isAvailable: boolean;
 }
 
@@ -40,7 +43,7 @@ export interface QueueClient {
   estimatedTime: Date;
   status: QueueStatus;
   notificationSent: boolean;
-  service: 'haircut' | 'plait';
+  service: Service;
   isWalkIn?: boolean;
 }
 
@@ -71,6 +74,7 @@ export const barbersData: Barber[] = [
     lunchStart: '13:00',
     lunchDurationMinutes: 45,
     averageCutMinutes: 35,
+    services: ['haircut'],
     isAvailable: true
   },
   {
@@ -84,6 +88,7 @@ export const barbersData: Barber[] = [
     lunchStart: '14:00',
     lunchDurationMinutes: 45,
     averageCutMinutes: 30,
+    services: ['haircut', 'plait'],
     isAvailable: true
   },
   {
@@ -97,6 +102,7 @@ export const barbersData: Barber[] = [
     lunchStart: '12:30',
     lunchDurationMinutes: 60,
     averageCutMinutes: 40,
+    services: ['haircut', 'plait'],
     isAvailable: true
   },
   {
@@ -110,6 +116,7 @@ export const barbersData: Barber[] = [
     lunchStart: '15:00',
     lunchDurationMinutes: 30,
     averageCutMinutes: 25,
+    services: ['haircut'],
     isAvailable: false
   },
   {
@@ -123,6 +130,7 @@ export const barbersData: Barber[] = [
     lunchStart: '13:30',
     lunchDurationMinutes: 45,
     averageCutMinutes: 50,
+    services: ['haircut'],
     isAvailable: true
   }
 ];

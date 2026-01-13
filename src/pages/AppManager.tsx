@@ -135,8 +135,8 @@ const AppManager: React.FC = () => {
   );
 
   return (
-    <div className="min-h-screen bg-white">
-      <header className="sticky top-0 z-40 border-b border-border/60 bg-white/75 backdrop-blur-md">
+    <div className="min-h-screen bg-background">
+      <header className="sticky top-0 z-40 border-b border-border/60 bg-background/75 backdrop-blur-md">
         <div className="max-w-5xl mx-auto px-6 py-4 flex flex-col gap-4">
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>

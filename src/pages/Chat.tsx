@@ -741,7 +741,7 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
   const latestMessageId = messages[messages.length - 1]?.id ?? null;
 
   return (
-    <div className="min-h-screen bg-white">
+    <div className="min-h-screen bg-background">
       <ChatHeader />
 
       <div className="max-w-lg mx-auto pt-28 pb-24 px-4">

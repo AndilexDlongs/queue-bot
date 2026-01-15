@@ -71,6 +71,7 @@ const getProviders = (businessId) => {
         p.lunch_duration_minutes AS lunchDurationMinutes,
         p.average_service_minutes AS averageServiceMinutes,
         p.is_available AS isAvailable,
+        p.last_seen_at AS lastSeenAt,
         group_concat(s.key, ',') AS serviceKeys
       FROM providers p
       LEFT JOIN provider_services ps ON ps.provider_id = p.id
@@ -283,22 +284,81 @@ app.post('/api/businesses/:businessId/providers', (req, res) => {
 
 app.patch('/api/providers/:providerId', (req, res) => {
   const { providerId } = req.params;
-  const { isAvailable } = req.body ?? {};
+  const {
+    isAvailable,
+    lastSeenAt,
+    name,
+    phone,
+    email,
+    startTime,
+    endTime,
+    lunchStart,
+    lunchDurationMinutes,
+    averageServiceMinutes
+  } = req.body ?? {};
 
-  if (typeof isAvailable !== 'boolean') {
-    res.status(400).json({ error: 'isAvailable must be a boolean.' });
+  const updates = [];
+  const params = [];
+  const addUpdate = (field, value) => {
+    if (value === undefined) return;
+    updates.push(`${field} = ?`);
+    params.push(value);
+  };
+
+  if (typeof name === 'string') addUpdate('name', name);
+  if (typeof phone === 'string') addUpdate('phone', phone);
+  if (typeof email === 'string') addUpdate('email', email);
+  if (typeof startTime === 'string') addUpdate('start_time', startTime);
+  if (typeof endTime === 'string') addUpdate('end_time', endTime);
+  if (typeof lunchStart === 'string') addUpdate('lunch_start', lunchStart);
+  if (lunchDurationMinutes !== undefined) {
+    const minutes = Number(lunchDurationMinutes);
+    if (Number.isFinite(minutes)) addUpdate('lunch_duration_minutes', minutes);
+  }
+  if (averageServiceMinutes !== undefined) {
+    const minutes = Number(averageServiceMinutes);
+    if (Number.isFinite(minutes)) addUpdate('average_service_minutes', minutes);
+  }
+  if (typeof isAvailable === 'boolean') {
+    addUpdate('is_available', isAvailable ? 1 : 0);
+  }
+  if (typeof lastSeenAt === 'string') {
+    addUpdate('last_seen_at', lastSeenAt);
+  }
+
+  if (updates.length === 0) {
+    res.status(400).json({ error: 'No valid fields to update.' });
     return;
   }
 
   const result = db
-    .prepare('UPDATE providers SET is_available = ? WHERE id = ?')
-    .run(isAvailable ? 1 : 0, providerId);
+    .prepare(`UPDATE providers SET ${updates.join(', ')} WHERE id = ?`)
+    .run(...params, providerId);
 
   if (!result.changes) {
     res.status(404).json({ error: 'Provider not found.' });
     return;
   }
 
+  res.json({ ok: true });
+});
+
+app.delete('/api/providers/:providerId', (req, res) => {
+  const { providerId } = req.params;
+  const provider = db.prepare('SELECT id FROM providers WHERE id = ?').get(providerId);
+
+  if (!provider) {
+    res.status(404).json({ error: 'Provider not found.' });
+    return;
+  }
+
+  const transaction = db.transaction(() => {
+    db.prepare('DELETE FROM queue_entries WHERE provider_id = ?').run(providerId);
+    db.prepare('DELETE FROM provider_services WHERE provider_id = ?').run(providerId);
+    db.prepare('DELETE FROM providers WHERE id = ?').run(providerId);
+  });
+
+  transaction();
   res.json({ ok: true });
 });
 

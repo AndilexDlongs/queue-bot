@@ -19,6 +19,20 @@ const seedDatabase = () => {
   db.exec(seedSql);
 };
 
+const ensureProviderHeartbeatColumn = () => {
+  const hasProvidersTable = db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='providers'")
+    .get();
+  if (!hasProvidersTable) {
+    return;
+  }
+  const columns = db.prepare("PRAGMA table_info(providers)").all();
+  const hasLastSeen = columns.some(column => column.name === 'last_seen_at');
+  if (!hasLastSeen) {
+    db.prepare('ALTER TABLE providers ADD COLUMN last_seen_at TEXT').run();
+  }
+};
+
 const ensureDemoBusiness = () => {
   const existing = db
     .prepare('SELECT id FROM businesses WHERE id = ?')
@@ -187,6 +201,7 @@ export const initDb = () => {
   if (!hasBusinessesTable) {
     seedDatabase();
   }
+  ensureProviderHeartbeatColumn();
   ensureDemoBusiness();
 };
 

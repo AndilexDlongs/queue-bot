@@ -60,6 +60,7 @@ CREATE TABLE providers (
   lunch_duration_minutes INTEGER NOT NULL,
   average_service_minutes INTEGER NOT NULL,
   is_available INTEGER NOT NULL,
+  last_seen_at TEXT,
   role TEXT,
   FOREIGN KEY (business_id) REFERENCES businesses(id)
 );

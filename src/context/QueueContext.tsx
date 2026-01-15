@@ -30,6 +30,11 @@ interface NewBarberPayload {
   serviceKeys?: string[];
 }
 
+type UpdateBarberPayload = Partial<NewBarberPayload> & {
+  isAvailable?: boolean;
+  lastSeenAt?: string;
+};
+
 type QueueEntryResponse = Omit<QueueClient, 'joinedAt' | 'estimatedTime'> & {
   joinedAt: string;
   estimatedTime: string;
@@ -48,7 +53,9 @@ interface QueueContextValue {
   updateClientStatus: (clientId: string, status: QueueStatus) => Promise<void>;
   removeClient: (clientId: string) => Promise<void>;
   toggleBarberAvailability: (barberId: string) => Promise<void>;
-  addBarber: (barber: NewBarberPayload) => Promise<void>;
+  addBarber: (barber: NewBarberPayload) => Promise<string | null>;
+  updateBarber: (barberId: string, updates: UpdateBarberPayload) => Promise<void>;
+  removeBarber: (barberId: string) => Promise<void>;
 }
 
 const QueueContext = createContext<QueueContextValue | undefined>(undefined);
@@ -199,13 +206,39 @@ export const QueueProvider: React.FC<{ children: React.ReactNode; businessId?: s
 
   const addBarber = async (barber: NewBarberPayload) => {
     try {
-      await fetchJson(`/api/businesses/${activeBusinessId}/providers`, {
-        method: 'POST',
-        body: JSON.stringify(barber)
+      const response = await fetchJson<{ id?: string }>(
+        `/api/businesses/${activeBusinessId}/providers`,
+        {
+          method: 'POST',
+          body: JSON.stringify(barber)
+        }
+      );
+      await refreshData();
+      return response?.id ?? null;
+    } catch (error) {
+      console.error('Failed to add provider.', error);
+      return null;
+    }
+  };
+
+  const updateBarber = async (barberId: string, updates: UpdateBarberPayload) => {
+    try {
+      await fetchJson(`/api/providers/${barberId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(updates)
       });
       await refreshData();
     } catch (error) {
-      console.error('Failed to add provider.', error);
+      console.error('Failed to update provider.', error);
+    }
+  };
+
+  const removeBarber = async (barberId: string) => {
+    try {
+      await fetchJson(`/api/providers/${barberId}`, { method: 'DELETE' });
+      await refreshData();
+    } catch (error) {
+      console.error('Failed to remove provider.', error);
     }
   };
 
@@ -223,7 +256,9 @@ export const QueueProvider: React.FC<{ children: React.ReactNode; businessId?: s
       updateClientStatus,
       removeClient,
       toggleBarberAvailability,
-      addBarber
+      addBarber,
+      updateBarber,
+      removeBarber
     }),
     [salon, services, barbers, queue]
   );

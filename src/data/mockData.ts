@@ -38,6 +38,7 @@ export interface Barber {
   averageServiceMinutes: number;
   services?: string[];
   isAvailable: boolean;
+  lastSeenAt?: string;
 }
 
 export interface QueueClient {

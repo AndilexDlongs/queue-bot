@@ -11,17 +11,29 @@ const getRouteFromHash = (): Route => {
   return 'chat';
 };
 
+const getBusinessIdFromPath = () => {
+  const segment = window.location.pathname.split('/').filter(Boolean)[0];
+  if (segment) return segment;
+  return import.meta.env.VITE_BUSINESS_ID ?? 'business-1';
+};
+
 const App: React.FC = () => {
   const [route, setRoute] = useState<Route>(getRouteFromHash());
+  const [businessId, setBusinessId] = useState(getBusinessIdFromPath());
 
   useEffect(() => {
     const onHashChange = () => setRoute(getRouteFromHash());
+    const onPathChange = () => setBusinessId(getBusinessIdFromPath());
     window.addEventListener('hashchange', onHashChange);
-    return () => window.removeEventListener('hashchange', onHashChange);
+    window.addEventListener('popstate', onPathChange);
+    return () => {
+      window.removeEventListener('hashchange', onHashChange);
+      window.removeEventListener('popstate', onPathChange);
+    };
   }, []);
 
   return (
-    <QueueProvider>
+    <QueueProvider businessId={businessId}>
       {route === 'manager' ? <AppManager /> : <Chat />}
     </QueueProvider>
   );

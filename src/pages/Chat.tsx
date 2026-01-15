@@ -43,6 +43,7 @@ const isActiveClient = (client: QueueClient) =>
 const Chat: React.FC = () => {
   const {
     salon,
+    services,
     barbers,
     queue,
     getQueueCount,
@@ -52,7 +53,7 @@ const Chat: React.FC = () => {
   } = useQueue();
   const [messages, setMessages] = useState<Message[]>([]);
   const [step, setStep] = useState<ChatStep>('welcome');
-  const [selectedService, setSelectedService] = useState<QueueClient['service'] | null>(null);
+  const [selectedService, setSelectedService] = useState<string | null>(null);
   const [selectedBarber, setSelectedBarber] = useState<string | null>(null);
   const [clientPhone, setClientPhone] = useState<string>('');
   const [clientEmail, setClientEmail] = useState<string>('');
@@ -117,6 +118,22 @@ const Chat: React.FC = () => {
   const formatJoinMethod = (method: 'phone' | 'email') =>
     method === 'phone' ? 'phone number' : 'email';
 
+  const getServiceName = (serviceKey: string) =>
+    services.find(service => service.key === serviceKey)?.name ?? serviceKey;
+
+  const getProviderLabels = () => {
+    if (salon.businessType === 'general_practitioner') {
+      return { singular: 'doctor', plural: 'doctors' };
+    }
+    if (salon.businessType === 'barbershop') {
+      return { singular: 'barber', plural: 'barbers' };
+    }
+    return { singular: 'provider', plural: 'providers' };
+  };
+
+  const { singular: providerLabel, plural: providerLabelPlural } = getProviderLabels();
+  const providerLabelTitle = providerLabel[0].toUpperCase() + providerLabel.slice(1);
+
   const startVerification = (method: 'phone' | 'email', value: string) => {
     const code = sendVerificationCode(method, value);
     if (method === 'phone') {
@@ -135,11 +152,15 @@ const Chat: React.FC = () => {
   };
 
   const showWelcomeOptions = (intro?: string) => {
+    const serviceOptions = services.map(service => ({
+      label: service.ctaLabel ?? service.name,
+      value: service.key
+    }));
+
     addBotMessage(
       intro ?? `Welcome to ${salon.name}!\n\nHow can we help you today?`,
       [
-        { label: 'Get a haircut', value: 'haircut' },
-        { label: 'Plait or braid hair', value: 'plait' },
+        ...serviceOptions,
         { label: 'Check my queue position', value: 'check-position' },
         { label: 'Leave the queue', value: 'leave-queue' }
       ]
@@ -175,7 +196,7 @@ const Chat: React.FC = () => {
     setTimeout(() => {
       switch (step) {
         case 'welcome':
-          if (value === 'haircut' || value === 'plait') {
+          if (services.some(service => service.key === value)) {
             setSelectedService(value);
             showBarberSelection(value);
           } else if (value === 'check-position') {
@@ -368,9 +389,9 @@ Demo code: ${code}`
         case 'leave-confirm':
           if (value === 'confirm-leave') {
             if (pendingLeaveMatches.length > 0) {
-              confirmLeaveMatches();
+              void confirmLeaveMatches();
             } else {
-              handleLeaveCurrentQueue();
+              void handleLeaveCurrentQueue();
             }
           } else if (value === 'never-mind') {
             if (pendingLeaveMatches.length > 0) {
@@ -459,11 +480,11 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
     showWelcomeOptions();
   };
 
-  const barberSupportsService = (barber: Barber, service: QueueClient['service']) =>
+  const barberSupportsService = (barber: Barber, service: string) =>
     !barber.services || barber.services.includes(service);
 
-  const showBarberSelection = (service: QueueClient['service']) => {
-    const serviceLabel = service === 'haircut' ? 'a haircut' : 'plaiting';
+  const showBarberSelection = (service: string) => {
+    const serviceLabel = getServiceName(service).toLowerCase();
     const registeredBarbers = barbers.filter(b => barberSupportsService(b, service));
     const availableBarbers = registeredBarbers.filter(b => b.isAvailable);
 
@@ -476,9 +497,12 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
     }
 
     if (availableBarbers.length === 0) {
-      addBotMessage(`Sorry, no barbers are available for ${serviceLabel} right now.`, [
-        { label: 'Go back', value: 'back' }
-      ]);
+      addBotMessage(
+        `Sorry, no ${providerLabelPlural} are available for ${serviceLabel} right now.`,
+        [
+          { label: 'Go back', value: 'back' }
+        ]
+      );
       setStep('select-barber');
       return;
     }
@@ -490,7 +514,7 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
     }));
 
     addBotMessage(
-      `Here are our available barbers for ${serviceLabel}:
+      `Here are our available ${providerLabelPlural} for ${serviceLabel}:
 
 ` +
         `Please select who you'd like to see:`,
@@ -543,7 +567,7 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
           setStep('verify-code');
           return;
         }
-        completeQueueJoin();
+        void completeQueueJoin();
       } else if (step === 'check-phone' || step === 'check-email') {
         handleCheckPosition(value);
       } else if (step === 'leave-phone' || step === 'leave-email') {
@@ -596,7 +620,7 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
 
     const summaries = details.map(
       detail =>
-        `Barber: ${detail.barberName} | Position: #${detail.position} | Est wait: ~${detail.waitMinutes} min`
+        `${providerLabelTitle}: ${detail.barberName} | Position: #${detail.position} | Est wait: ~${detail.waitMinutes} min`
     );
     const shouldHeadToShop = details.some(
       detail => detail.waitMinutes < 50 || detail.position === 3
@@ -639,7 +663,7 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
     setStep('leave-confirm');
   };
 
-  const confirmLeaveMatches = () => {
+  const confirmLeaveMatches = async () => {
     if (pendingLeaveMatches.length === 0) {
       addBotMessage("We couldn't find your queue entry.", [
         { label: 'Start over', value: 'restart' }
@@ -648,7 +672,7 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
       return;
     }
 
-    pendingLeaveMatches.forEach(match => removeClient(match.id));
+    await Promise.all(pendingLeaveMatches.map(match => removeClient(match.id)));
     setPendingLeaveMatches([]);
 
     addBotMessage(
@@ -658,7 +682,7 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
     setStep('cancelled');
   };
 
-  const handleLeaveCurrentQueue = () => {
+  const handleLeaveCurrentQueue = async () => {
     if (!joinedClientId) {
       addBotMessage("We couldn't find your queue entry.", [
         { label: 'Start over', value: 'restart' }
@@ -667,7 +691,7 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
       return;
     }
 
-    removeClient(joinedClientId);
+    await removeClient(joinedClientId);
     setJoinedClientId(null);
     setPendingLeaveMatches([]);
 
@@ -677,7 +701,7 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
     setStep('cancelled');
   };
 
-  const completeQueueJoin = () => {
+  const completeQueueJoin = async () => {
     if (!selectedBarber || !selectedService) {
       showWelcomeOptions();
       return;
@@ -687,21 +711,16 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
     const waitTime = getEstimatedWaitTime(selectedBarber);
     const queuePosition = getQueueCount(selectedBarber) + 1;
 
-    const newClient: QueueClient = {
-      id: `client-${Date.now()}`,
-      visibleId: queuePosition,
+    const newClientId = await addToQueue({
+      barberId: selectedBarber,
+      service: selectedService,
       name: 'Guest',
       phone: clientPhone || undefined,
-      email: clientEmail || undefined,
-      barberId: selectedBarber,
-      joinedAt: new Date(),
-      estimatedTime: new Date(Date.now() + waitTime * 60000),
-      status: 'waiting',
-      notificationSent: false,
-      service: selectedService
-    };
-    addToQueue(newClient);
-    setJoinedClientId(newClient.id);
+      email: clientEmail || undefined
+    });
+    if (newClientId) {
+      setJoinedClientId(newClientId);
+    }
     setVerificationCode(null);
     setVerificationMethod(null);
     setVerificationTarget('');
@@ -711,9 +730,9 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
       `You're in the queue!
 
 ` +
-        `Barber: ${barber?.name}
+        `${providerLabelTitle}: ${barber?.name}
 ` +
-        `Service: ${selectedService === 'haircut' ? 'Haircut' : 'Plaiting'}
+        `Service: ${selectedService ? getServiceName(selectedService) : 'Service'}
 ` +
         `Position: #${queuePosition}
 ` +

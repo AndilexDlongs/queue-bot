@@ -15,6 +15,9 @@ type ChatStep =
   | 'enter-email'
   | 'verify-code'
   | 'duplicate-confirm'
+  | 'off-duty'
+  | 'off-duty-entry'
+  | 'off-duty-provider'
   | 'check-start'
   | 'check-phone'
   | 'check-email'
@@ -39,6 +42,73 @@ interface Message {
 const normalizePhone = (value: string) => value.replace(/\D/g, '');
 const isActiveClient = (client: QueueClient) =>
   !['done', 'declined', 'left'].includes(client.status);
+
+type StoredContact = {
+  method: 'phone' | 'email';
+  value: string;
+  storedAt: number;
+};
+
+const CONTACT_STORAGE_KEY = 'queuebot.last-contact';
+const CONTACT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+const formatWaitTime = (minutes: number) => {
+  const rounded = Math.max(1, Math.round(minutes));
+  if (rounded < 60) {
+    return `${rounded} minute${rounded === 1 ? '' : 's'}`;
+  }
+  const hours = Math.floor(rounded / 60);
+  const mins = rounded % 60;
+  const hourLabel = `${hours} hour${hours === 1 ? '' : 's'}`;
+  if (mins === 0) {
+    return hourLabel;
+  }
+  return `${hourLabel} ${mins} minute${mins === 1 ? '' : 's'}`;
+};
+
+const loadStoredContact = (): StoredContact | null => {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(CONTACT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredContact;
+    if (!parsed?.method || !parsed.value || !parsed.storedAt) {
+      return null;
+    }
+    if (Date.now() - parsed.storedAt > CONTACT_TTL_MS) {
+      window.localStorage.removeItem(CONTACT_STORAGE_KEY);
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+};
+
+const saveStoredContact = (contact: StoredContact) => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(CONTACT_STORAGE_KEY, JSON.stringify(contact));
+  } catch {
+    // Ignore storage failures (private browsing or disabled storage).
+  }
+};
+
+const formatStoredContactLabel = (contact: StoredContact) => {
+  if (contact.method === 'phone') {
+    const digits = normalizePhone(contact.value);
+    if (!digits) return 'phone on file';
+    const tail = digits.slice(-4);
+    return tail ? `ending in ${tail}` : digits;
+  }
+  const normalized = contact.value.trim().toLowerCase();
+  const [user, domain] = normalized.split('@');
+  if (!domain) return normalized;
+  if (!user) return `@${domain}`;
+  const maskedUser =
+    user.length <= 2 ? `${user[0]}*` : `${user[0]}***${user[user.length - 1]}`;
+  return `${maskedUser}@${domain}`;
+};
 
 const Chat: React.FC = () => {
   const {
@@ -66,7 +136,12 @@ const Chat: React.FC = () => {
     method: 'phone' | 'email';
     value: string;
   } | null>(null);
+  const [pendingDuplicateMatches, setPendingDuplicateMatches] = useState<QueueClient[]>([]);
   const [pendingLeaveMatches, setPendingLeaveMatches] = useState<QueueClient[]>([]);
+  const [savedContact, setSavedContact] = useState<StoredContact | null>(null);
+  const [offDutyMatches, setOffDutyMatches] = useState<QueueClient[]>([]);
+  const [pendingOffDutyEntry, setPendingOffDutyEntry] = useState<QueueClient | null>(null);
+  const [pendingOffDutyMode, setPendingOffDutyMode] = useState<'auto' | 'choose' | null>(null);
   const [showInput, setShowInput] = useState(false);
   const [inputType, setInputType] = useState<'tel' | 'email' | 'text'>('text');
   const [inputPlaceholder, setInputPlaceholder] = useState('');
@@ -85,6 +160,13 @@ const Chat: React.FC = () => {
     if (didInitRef.current) return;
     didInitRef.current = true;
     showWelcomeOptions();
+  }, []);
+
+  useEffect(() => {
+    const stored = loadStoredContact();
+    if (stored) {
+      setSavedContact(stored);
+    }
   }, []);
 
   const addBotMessage = (text: string, options?: Message['options']) => {
@@ -133,8 +215,86 @@ const Chat: React.FC = () => {
 
   const { singular: providerLabel, plural: providerLabelPlural } = getProviderLabels();
   const providerLabelTitle = providerLabel[0].toUpperCase() + providerLabel.slice(1);
+  const fullAddress = `${salon.address}, ${salon.city}`;
+
+  const rememberContact = (method: 'phone' | 'email', value: string) => {
+    const normalized =
+      method === 'phone' ? normalizePhone(value) : value.trim().toLowerCase();
+    if (!normalized) return;
+    const stored = { method, value: normalized, storedAt: Date.now() };
+    saveStoredContact(stored);
+    setSavedContact(stored);
+  };
+
+  const resetOffDutyState = () => {
+    setOffDutyMatches([]);
+    setPendingOffDutyEntry(null);
+    setPendingOffDutyMode(null);
+  };
+
+  const copyTextToClipboard = async (text: string) => {
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch {
+        // Fall through to manual copy.
+      }
+    }
+
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.top = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.select();
+      const success = document.execCommand('copy');
+      document.body.removeChild(textarea);
+      return success;
+    } catch {
+      return false;
+    }
+  };
+
+  const handleCopyAddress = async () => {
+    const didCopy = await copyTextToClipboard(fullAddress);
+    addBotMessage(
+      didCopy
+        ? 'Address copied to clipboard.'
+        : 'Unable to copy the address automatically. Please select it to copy manually.',
+      [
+        { label: 'Leave the queue', value: 'leave-queue' },
+        { label: 'Start over', value: 'restart' }
+      ]
+    );
+  };
+
+  const getQueuePosition = (match: QueueClient) => {
+    const activeQueue = queue
+      .filter(client => client.barberId === match.barberId && isActiveClient(client))
+      .sort((a, b) => a.visibleId - b.visibleId);
+    return activeQueue.findIndex(client => client.id === match.id) + 1;
+  };
+
+  const getAvailableProvidersForService = (service: string) =>
+    barbers.filter(barber => barber.isAvailable && barberSupportsService(barber, service));
+
+  const getMostAvailableProvider = (service: string) => {
+    const available = getAvailableProvidersForService(service);
+    if (available.length === 0) return null;
+    return available.reduce((best, candidate) => {
+      const bestWait = getEstimatedWaitTime(best.id);
+      const candidateWait = getEstimatedWaitTime(candidate.id);
+      if (candidateWait < bestWait) return candidate;
+      if (candidateWait > bestWait) return best;
+      return getQueueCount(candidate.id) < getQueueCount(best.id) ? candidate : best;
+    });
+  };
 
   const startVerification = (method: 'phone' | 'email', value: string) => {
+    rememberContact(method, value);
     const code = sendVerificationCode(method, value);
     if (method === 'phone') {
       setClientPhone(value);
@@ -173,7 +333,9 @@ const Chat: React.FC = () => {
     setInputType('text');
     setInputPlaceholder('');
     setPendingJoinContact(null);
+    setPendingDuplicateMatches([]);
     setPendingLeaveMatches([]);
+    resetOffDutyState();
 
     if (step === 'enter-phone' || step === 'enter-email' || step === 'verify-code') {
       setClientPhone('');
@@ -194,6 +356,19 @@ const Chat: React.FC = () => {
     setShowInput(false);
 
     setTimeout(() => {
+      if (value === 'copy-address') {
+        void handleCopyAddress();
+        return;
+      }
+      if (value === 'use-different-contact-check') {
+        promptForLookup('check', { preferSavedContact: false });
+        return;
+      }
+      if (value === 'use-different-contact-leave') {
+        promptForLookup('leave', { preferSavedContact: false });
+        return;
+      }
+
       switch (step) {
         case 'welcome':
           if (services.some(service => service.key === value)) {
@@ -219,7 +394,7 @@ const Chat: React.FC = () => {
               `Great choice! ${barber?.name} is ready for you.
 
 ` +
-                `Current wait: ~${waitTime} minutes
+                `Current wait: ~${formatWaitTime(waitTime)}
 ` +
                 `People in queue: ${queueCount}
 
@@ -303,15 +478,50 @@ Demo code: ${code}`
           if (value === 'duplicate-join') {
             const { method, value: contactValue } = pendingJoinContact;
             setPendingJoinContact(null);
+            setPendingDuplicateMatches([]);
             startVerification(method, contactValue);
+          } else if (value === 'duplicate-leave-join') {
+            void handleDuplicateLeaveAndJoin();
           } else if (value === 'duplicate-check') {
             const { method, value: contactValue } = pendingJoinContact;
             setPendingJoinContact(null);
+            setPendingDuplicateMatches([]);
             handleCheckPositionLookup(contactValue, method);
           } else if (value === 'never-mind') {
             setPendingJoinContact(null);
+            setPendingDuplicateMatches([]);
             showWelcomeOptions('No problem. What would you like to do next?');
           }
+          break;
+
+        case 'off-duty':
+          if (value === 'off-duty-choose') {
+            handleOffDutyReassignment('choose');
+          } else if (value === 'off-duty-auto') {
+            handleOffDutyReassignment('auto');
+          } else if (value === 'restart') {
+            resetChat();
+          }
+          break;
+
+        case 'off-duty-entry':
+          if (value === 'back') {
+            showOffDutyPrompt();
+            break;
+          }
+          handleOffDutyEntrySelection(value);
+          break;
+
+        case 'off-duty-provider':
+          if (value === 'back') {
+            if (pendingOffDutyEntry && offDutyMatches.length <= 1) {
+              showOffDutyPrompt();
+            } else {
+              showOffDutyEntrySelection(pendingOffDutyMode ?? 'choose');
+            }
+            break;
+          }
+          void handleManualReassignment(value);
           break;
 
         case 'check-start':
@@ -431,10 +641,33 @@ Demo code: ${code}`
     }, 500);
   };
 
-  const promptForLookup = (mode: 'check' | 'leave') => {
+  const promptForLookup = (
+    mode: 'check' | 'leave',
+    options?: { preferSavedContact?: boolean }
+  ) => {
     if (mode === 'leave') {
       setPendingLeaveMatches([]);
     }
+
+    const canUseSaved =
+      options?.preferSavedContact !== false &&
+      savedContact &&
+      (!joinMethod || savedContact.method === joinMethod);
+
+    if (canUseSaved && savedContact) {
+      addBotMessage(
+        `Using your saved ${formatJoinMethod(savedContact.method)} ${formatStoredContactLabel(
+          savedContact
+        )}.`
+      );
+      if (mode === 'check') {
+        handleCheckPositionLookup(savedContact.value, savedContact.method);
+      } else {
+        handleLeaveQueueLookup(savedContact.value, savedContact.method);
+      }
+      return;
+    }
+
     const base =
       mode === 'check'
         ? 'How would you like to look up your spot in line?'
@@ -444,7 +677,7 @@ Demo code: ${code}`
 
 Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
       : '';
-    const options = joinMethod
+    const lookupOptions = joinMethod
       ? [
           {
             label: joinMethod === 'phone' ? 'Use phone number' : 'Use email',
@@ -458,7 +691,7 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
           { label: 'Go back', value: 'back' }
         ];
 
-    addBotMessage(`${base}${hint}`, options);
+    addBotMessage(`${base}${hint}`, lookupOptions);
     setStep(mode === 'check' ? 'check-start' : 'leave-start');
   };
 
@@ -475,7 +708,10 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
     setVerificationMethod(null);
     setVerificationTarget('');
     setPendingJoinContact(null);
+    setPendingDuplicateMatches([]);
+    setPendingDuplicateMatches([]);
     setPendingLeaveMatches([]);
+    resetOffDutyState();
     setShowInput(false);
     showWelcomeOptions();
   };
@@ -509,7 +745,9 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
 
     const barberOptions = availableBarbers.map(b => ({
       label: b.name,
-      sublabel: `~${getEstimatedWaitTime(b.id)} min wait - ${getQueueCount(b.id)} in queue`,
+      sublabel: `~${formatWaitTime(getEstimatedWaitTime(b.id))} wait - ${getQueueCount(
+        b.id
+      )} in queue`,
       value: b.id
     }));
 
@@ -523,6 +761,219 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
     setStep('select-barber');
   };
 
+  const buildQueueDetails = (match: QueueClient) => {
+    const barber = barbers.find(b => b.id === match.barberId);
+    const position = getQueuePosition(match);
+    const waitMinutes = Math.max(
+      5,
+      Math.round((match.estimatedTime.getTime() - Date.now()) / 60000)
+    );
+    return {
+      match,
+      barber,
+      position,
+      waitMinutes
+    };
+  };
+
+  const showOffDutyPrompt = (matches = offDutyMatches, onDutySummaries: string[] = []) => {
+    if (matches.length === 0) {
+      showWelcomeOptions();
+      return;
+    }
+    const names = Array.from(
+      new Set(
+        matches.map(match => barbers.find(b => b.id === match.barberId)?.name ?? providerLabel)
+      )
+    );
+    const verb = names.length === 1 ? 'is' : 'are';
+    const apology = `We apologize, ${names.join(', ')} ${verb} now off duty.`;
+    const onDutyNote = onDutySummaries.length
+      ? `\n\nCurrent on-duty queues:\n${onDutySummaries.join('\n')}`
+      : '';
+
+    addBotMessage(
+      `${apology}${onDutyNote}\n\nWould you like to choose a different ${providerLabel} or should we assign you the most available ${providerLabel}?`,
+      [
+        { label: `Choose a different ${providerLabel}`, value: 'off-duty-choose' },
+        { label: `Assign the most available ${providerLabel}`, value: 'off-duty-auto' },
+        { label: 'Use a different contact', value: 'use-different-contact-check' },
+        { label: 'Start over', value: 'restart' }
+      ]
+    );
+    setStep('off-duty');
+  };
+
+  const showOffDutyEntrySelection = (mode: 'auto' | 'choose') => {
+    if (offDutyMatches.length === 0) {
+      showWelcomeOptions();
+      return;
+    }
+    setPendingOffDutyMode(mode);
+    const entryOptions = offDutyMatches.map(match => {
+      const barberName = barbers.find(b => b.id === match.barberId)?.name ?? providerLabelTitle;
+      const serviceName = getServiceName(match.service);
+      const position = getQueuePosition(match);
+      return {
+        label: `${providerLabelTitle}: ${barberName}`,
+        sublabel: `${serviceName} - Position #${position}`,
+        value: match.id
+      };
+    });
+
+    addBotMessage(
+      'We found multiple off-duty queue entries. Which one should we move?',
+      [...entryOptions, { label: 'Go back', value: 'back' }]
+    );
+    setStep('off-duty-entry');
+  };
+
+  const handleOffDutyReassignment = (mode: 'auto' | 'choose') => {
+    if (offDutyMatches.length === 0) {
+      showWelcomeOptions();
+      return;
+    }
+    if (offDutyMatches.length === 1) {
+      const entry = offDutyMatches[0];
+      setPendingOffDutyEntry(entry);
+      if (mode === 'auto') {
+        void handleAutoReassignment(entry);
+      } else {
+        showOffDutyProviderSelection(entry);
+      }
+      return;
+    }
+    showOffDutyEntrySelection(mode);
+  };
+
+  const handleOffDutyEntrySelection = (entryId: string) => {
+    const entry = offDutyMatches.find(match => match.id === entryId);
+    if (!entry) {
+      showWelcomeOptions();
+      return;
+    }
+    setPendingOffDutyEntry(entry);
+    if (pendingOffDutyMode === 'auto') {
+      void handleAutoReassignment(entry);
+    } else {
+      showOffDutyProviderSelection(entry);
+    }
+  };
+
+  const showOffDutyProviderSelection = (entry: QueueClient) => {
+    const serviceName = getServiceName(entry.service);
+    const availableProviders = getAvailableProvidersForService(entry.service);
+    if (availableProviders.length === 0) {
+      addBotMessage(
+        `Sorry, no ${providerLabelPlural} are on duty for ${serviceName} right now.`,
+        [{ label: 'Start over', value: 'restart' }]
+      );
+      setStep('cancelled');
+      return;
+    }
+
+    const providerOptions = availableProviders.map(barber => ({
+      label: barber.name,
+      sublabel: `~${formatWaitTime(getEstimatedWaitTime(barber.id))} wait - ${getQueueCount(
+        barber.id
+      )} in queue`,
+      value: barber.id
+    }));
+
+    addBotMessage(
+      `Select a different ${providerLabel} for ${serviceName}:`,
+      [...providerOptions, { label: 'Go back', value: 'back' }]
+    );
+    setStep('off-duty-provider');
+  };
+
+  const handleManualReassignment = async (providerId: string) => {
+    if (!pendingOffDutyEntry) {
+      showWelcomeOptions();
+      return;
+    }
+    await reassignQueueEntry(pendingOffDutyEntry, providerId);
+  };
+
+  const handleAutoReassignment = async (entry: QueueClient) => {
+    const provider = getMostAvailableProvider(entry.service);
+    if (!provider) {
+      addBotMessage(
+        `Sorry, no ${providerLabelPlural} are on duty for ${getServiceName(entry.service)} right now.`,
+        [{ label: 'Start over', value: 'restart' }]
+      );
+      setStep('cancelled');
+      return;
+    }
+    await reassignQueueEntry(entry, provider.id);
+  };
+
+  const handleDuplicateLeaveAndJoin = async () => {
+    if (!pendingJoinContact) {
+      showWelcomeOptions();
+      return;
+    }
+
+    const { method, value } = pendingJoinContact;
+    if (pendingDuplicateMatches.length > 0) {
+      await Promise.all(pendingDuplicateMatches.map(match => removeClient(match.id)));
+    }
+
+    setPendingDuplicateMatches([]);
+    setPendingJoinContact(null);
+    startVerification(method, value);
+  };
+
+  const reassignQueueEntry = async (entry: QueueClient, providerId: string) => {
+    const provider = barbers.find(barber => barber.id === providerId);
+    if (!provider) {
+      addBotMessage("We couldn't find that service provider.", [
+        { label: 'Start over', value: 'restart' }
+      ]);
+      setStep('cancelled');
+      return;
+    }
+
+    const queuePosition = getQueueCount(providerId) + 1;
+    const waitTime = getEstimatedWaitTime(providerId);
+    const payload = {
+      barberId: providerId,
+      service: entry.service,
+      name: entry.name,
+      phone: entry.phone ?? (savedContact?.method === 'phone' ? savedContact.value : undefined),
+      email: entry.email ?? (savedContact?.method === 'email' ? savedContact.value : undefined)
+    };
+
+    const newClientId = await addToQueue(payload);
+    if (!newClientId) {
+      addBotMessage("We couldn't move you to a new queue. Please try again.", [
+        { label: 'Start over', value: 'restart' }
+      ]);
+      setStep('cancelled');
+      return;
+    }
+
+    await removeClient(entry.id);
+    setJoinedClientId(newClientId);
+    resetOffDutyState();
+
+    addBotMessage(
+      `You're now in the queue!\n\n` +
+        `${providerLabelTitle}: ${provider.name}\n` +
+        `Service: ${getServiceName(entry.service)}\n` +
+        `Position: #${queuePosition}\n` +
+        `Estimated wait: ~${formatWaitTime(waitTime)}\n\n` +
+        `We'll notify you 45 minutes before your turn.\n\n` +
+        `Address: ${fullAddress}`,
+      [
+        { label: 'Copy address', value: 'copy-address' },
+        { label: 'Leave the queue', value: 'leave-queue' },
+        { label: 'Start over', value: 'restart' }
+      ]
+    );
+    setStep('joined-success');
+  };
+
   const handleInputSubmit = (value: string) => {
     addClientMessage(value);
     setShowInput(false);
@@ -530,15 +981,28 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
     setTimeout(() => {
       if (step === 'enter-phone' || step === 'enter-email') {
         const method: 'phone' | 'email' = step === 'enter-phone' ? 'phone' : 'email';
+        rememberContact(method, value);
         const matches = findMatches(value, method);
         if (matches.length > 0) {
           const contactLabel = method === 'phone' ? 'phone number' : 'email';
           setPendingJoinContact({ method, value });
+          setPendingDuplicateMatches(matches);
+          const details = matches.map(buildQueueDetails);
+          const summaries = details.map(detail => {
+            const barberName = detail.barber?.name ?? providerLabelTitle;
+            return `${providerLabelTitle}: ${barberName} | Service: ${getServiceName(
+              detail.match.service
+            )} | Position: #${detail.position}`;
+          });
+
           addBotMessage(
-            `That ${contactLabel} is already on the waiting list. Would you like to join again for someone else?`,
+            `That ${contactLabel} is already on the waiting list.\n\n${summaries.join(
+              '\n'
+            )}\n\nWould you like to leave that queue and join another, or join again for someone else?`,
             [
-              { label: 'Yes, join for someone else', value: 'duplicate-join' },
-              { label: 'No, check my position', value: 'duplicate-check' },
+              { label: 'Leave that queue and join another', value: 'duplicate-leave-join' },
+              { label: 'Join again for someone else', value: 'duplicate-join' },
+              { label: 'Check my position', value: 'duplicate-check' },
               { label: 'Never mind', value: 'never-mind' }
             ]
           );
@@ -569,9 +1033,11 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
         }
         void completeQueueJoin();
       } else if (step === 'check-phone' || step === 'check-email') {
-        handleCheckPosition(value);
+        const kind: 'phone' | 'email' = step === 'check-phone' ? 'phone' : 'email';
+        handleCheckPositionLookup(value, kind);
       } else if (step === 'leave-phone' || step === 'leave-email') {
-        handleLeaveQueue(value);
+        const kind: 'phone' | 'email' = step === 'leave-phone' ? 'phone' : 'email';
+        handleLeaveQueueLookup(value, kind);
       }
     }, 500);
   };
@@ -590,76 +1056,109 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
   };
 
   const handleCheckPositionLookup = (value: string, kind: 'phone' | 'email') => {
+    rememberContact(kind, value);
     const matches = findMatches(value, kind);
 
     if (matches.length === 0) {
+      resetOffDutyState();
       addBotMessage(
         "We could not find an active queue entry with that contact. Want to try again?",
-        [{ label: 'Start over', value: 'restart' }]
+        [
+          { label: 'Use a different contact', value: 'use-different-contact-check' },
+          { label: 'Start over', value: 'restart' }
+        ]
       );
       setStep('cancelled');
       return;
     }
 
-    const details = matches.map(match => {
-      const barber = barbers.find(b => b.id === match.barberId);
-      const activeQueue = queue
-        .filter(client => client.barberId === match.barberId && isActiveClient(client))
-        .sort((a, b) => a.visibleId - b.visibleId);
-      const position = activeQueue.findIndex(client => client.id === match.id) + 1;
-      const waitMinutes = Math.max(
-        5,
-        Math.round((match.estimatedTime.getTime() - Date.now()) / 60000)
-      );
-      return {
-        barberName: barber?.name ?? 'Unknown',
-        position,
-        waitMinutes
-      };
-    });
+    const details = matches.map(buildQueueDetails);
+    const offDutyDetails = details.filter(detail => !detail.barber?.isAvailable);
+    const onDutyDetails = details.filter(detail => detail.barber?.isAvailable);
 
-    const summaries = details.map(
-      detail =>
-        `${providerLabelTitle}: ${detail.barberName} | Position: #${detail.position} | Est wait: ~${detail.waitMinutes} min`
-    );
+    if (offDutyDetails.length > 0) {
+      const offDutyEntries = offDutyDetails.map(detail => detail.match);
+      setOffDutyMatches(offDutyEntries);
+      setPendingOffDutyEntry(null);
+      setPendingOffDutyMode(null);
+
+      const onDutySummaries = onDutyDetails.map(detail => {
+        const barberName = detail.barber?.name ?? providerLabelTitle;
+        return `${providerLabelTitle}: ${barberName} | Position: #${detail.position} | Est wait: ~${formatWaitTime(
+          detail.waitMinutes
+        )}`;
+      });
+
+      showOffDutyPrompt(offDutyEntries, onDutySummaries);
+      return;
+    }
+
+    resetOffDutyState();
+
+    const summaries = details.map(detail => {
+      const barberName = detail.barber?.name ?? providerLabelTitle;
+      return `${providerLabelTitle}: ${barberName} | Position: #${detail.position} | Est wait: ~${formatWaitTime(
+        detail.waitMinutes
+      )}`;
+    });
     const shouldHeadToShop = details.some(
       detail => detail.waitMinutes < 50 || detail.position === 3
     );
     const headNote = shouldHeadToShop
-      ? `\n\nIt's almost your turn. Start heading to the shop at ${salon.address}, ${salon.city}.`
+      ? `\n\nIt's almost your turn. Start heading to the shop at ${fullAddress}.`
       : '';
+    const statusOptions = [
+      ...(shouldHeadToShop ? [{ label: 'Copy address', value: 'copy-address' }] : []),
+      { label: 'Use a different contact', value: 'use-different-contact-check' },
+      { label: 'Start over', value: 'restart' }
+    ];
 
     addBotMessage(
       `Here is your latest queue status:\n\n${summaries.join('\n')}\n\n` +
         `We will notify you about 45 minutes before your turn.${headNote}`,
-      [{ label: 'Start over', value: 'restart' }]
+      statusOptions
     );
     setStep('cancelled');
   };
 
-  const handleCheckPosition = (value: string) => {
-    const kind = step === 'check-phone' ? 'phone' : 'email';
-    handleCheckPositionLookup(value, kind);
-  };
-
-  const handleLeaveQueue = (value: string) => {
-    const kind = step === 'leave-phone' ? 'phone' : 'email';
+  const handleLeaveQueueLookup = (value: string, kind: 'phone' | 'email') => {
+    rememberContact(kind, value);
     const matches = findMatches(value, kind);
 
     if (matches.length === 0) {
+      resetOffDutyState();
       addBotMessage(
         "We could not find an active queue entry with that contact.",
-        [{ label: 'Start over', value: 'restart' }]
+        [
+          { label: 'Use a different contact', value: 'use-different-contact-leave' },
+          { label: 'Start over', value: 'restart' }
+        ]
       );
       setStep('cancelled');
       return;
     }
+
+    resetOffDutyState();
     setPendingLeaveMatches(matches);
     const entryLabel = matches.length === 1 ? 'entry' : 'entries';
-    addBotMessage(`We found ${matches.length} active queue ${entryLabel}. Leave the queue?`, [
-      { label: 'Yes, leave the queue', value: 'confirm-leave' },
-      { label: 'Never mind', value: 'never-mind' }
-    ]);
+    const details = matches.map(buildQueueDetails);
+    const summaries = details.map(detail => {
+      const barberName = detail.barber?.name ?? providerLabelTitle;
+      return `${providerLabelTitle}: ${barberName} | Service: ${getServiceName(
+        detail.match.service
+      )} | Position: #${detail.position} | Est wait: ~${formatWaitTime(detail.waitMinutes)}`;
+    });
+
+    addBotMessage(
+      `We found ${matches.length} active queue ${entryLabel}.\n\nQueue details:\n${summaries.join(
+        '\n'
+      )}\n\nLeave the queue?`,
+      [
+        { label: 'Yes, leave the queue', value: 'confirm-leave' },
+        { label: 'Never mind', value: 'never-mind' },
+        { label: 'Use a different contact', value: 'use-different-contact-leave' }
+      ]
+    );
     setStep('leave-confirm');
   };
 
@@ -736,14 +1235,15 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
 ` +
         `Position: #${queuePosition}
 ` +
-        `Estimated wait: ~${waitTime} minutes
+        `Estimated wait: ~${formatWaitTime(waitTime)}
 
 ` +
         `We'll notify you 45 minutes before your turn.
 
 ` +
-        `Address: ${salon.address}, ${salon.city}`,
+        `Address: ${fullAddress}`,
       [
+        { label: 'Copy address', value: 'copy-address' },
         { label: 'Leave the queue', value: 'leave-queue' },
         { label: 'Start over', value: 'restart' }
       ]

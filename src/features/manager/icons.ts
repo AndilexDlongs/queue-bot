@@ -1,0 +1,14 @@
+export const queueBotLogo = new URL('../../assets/logos/queue-bot.svg', import.meta.url).href;
+export const operationsLogo = new URL('../../assets/logos/operations.svg', import.meta.url).href;
+export const managementLogo = new URL('../../assets/logos/management.svg', import.meta.url).href;
+export const detailsLogo = new URL('../../assets/logos/details.svg', import.meta.url).href;
+export const addProfileLogo = new URL('../../assets/logos/add-profile.svg', import.meta.url).href;
+export const phoneLogo = new URL('../../assets/logos/phone.svg', import.meta.url).href;
+export const profileLogo = new URL('../../assets/logos/profile.svg', import.meta.url).href;
+export const queueLogo = new URL('../../assets/logos/queue.svg', import.meta.url).href;
+export const servicedLogo = new URL('../../assets/logos/serviced.svg', import.meta.url).href;
+export const walkInLogo = new URL('../../assets/logos/walk-in.svg', import.meta.url).href;
+export const threeStripesLogo = new URL('../../assets/logos/three_stripes.svg', import.meta.url).href;
+export const deleteLogo = new URL('../../assets/logos/delete.svg', import.meta.url).href;
+export const editLogo = new URL('../../assets/logos/edit.svg', import.meta.url).href;
+export const saveLogo = new URL('../../assets/logos/save.svg', import.meta.url).href;

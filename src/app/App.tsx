@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import AppManager from './pages/AppManager';
-import Chat from './pages/Chat';
-import { QueueProvider } from './context/QueueContext';
+import ChatPage from '../features/chat/ChatPage';
+import ManagerPage from '../features/manager/ManagerPage';
+import { QueueProvider } from '../context/QueueContext';
 
 type Route = 'chat' | 'manager';
 
@@ -34,7 +34,7 @@ const App: React.FC = () => {
 
   return (
     <QueueProvider businessId={businessId}>
-      {route === 'manager' ? <AppManager /> : <Chat />}
+      {route === 'manager' ? <ManagerPage /> : <ChatPage />}
     </QueueProvider>
   );
 };

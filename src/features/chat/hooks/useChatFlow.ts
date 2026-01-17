@@ -1,116 +1,24 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ChatHeader } from '../components/chat/ChatHeader';
-import { ChatBubble } from '../components/chat/ChatBubble';
-import { ChatOption } from '../components/chat/ChatOption';
-import { ChatInput } from '../components/chat/ChatInput';
-import { useQueue } from '../context/QueueContext';
-import { Barber, QueueClient } from '../data/mockData';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useQueue } from '../../../context/QueueContext';
+import type { QueueClient } from '../../../data/mockData';
+import type { ChatStep, ContactMethod, Message, StoredContact } from '../types';
+import { loadStoredContact, saveStoredContact } from '../utils/contactStorage';
+import {
+  barberSupportsService,
+  copyTextToClipboard,
+  formatJoinMethod,
+  formatStoredContactLabel,
+  formatWaitTime,
+  isActiveClient,
+  normalizePhone
+} from '../utils/chatUtils';
 
-type ChatStep =
-  | 'welcome'
-  | 'select-barber'
-  | 'confirm-join'
-  | 'select-notification'
-  | 'enter-phone'
-  | 'enter-email'
-  | 'verify-code'
-  | 'duplicate-confirm'
-  | 'off-duty'
-  | 'off-duty-entry'
-  | 'off-duty-provider'
-  | 'check-start'
-  | 'check-phone'
-  | 'check-email'
-  | 'leave-start'
-  | 'leave-phone'
-  | 'leave-email'
-  | 'leave-confirm'
-  | 'joined-success'
-  | 'cancelled';
-
-interface Message {
-  id: string;
-  text: string;
-  isBot: boolean;
-  options?: Array<{
-    label: string;
-    sublabel?: string;
-    value: string;
-  }>;
-}
-
-const normalizePhone = (value: string) => value.replace(/\D/g, '');
-const isActiveClient = (client: QueueClient) =>
-  !['done', 'declined', 'left'].includes(client.status);
-
-type StoredContact = {
-  method: 'phone' | 'email';
+type PendingContact = {
+  method: ContactMethod;
   value: string;
-  storedAt: number;
 };
 
-const CONTACT_STORAGE_KEY = 'queuebot.last-contact';
-const CONTACT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-
-const formatWaitTime = (minutes: number) => {
-  const rounded = Math.max(1, Math.round(minutes));
-  if (rounded < 60) {
-    return `${rounded} minute${rounded === 1 ? '' : 's'}`;
-  }
-  const hours = Math.floor(rounded / 60);
-  const mins = rounded % 60;
-  const hourLabel = `${hours} hour${hours === 1 ? '' : 's'}`;
-  if (mins === 0) {
-    return hourLabel;
-  }
-  return `${hourLabel} ${mins} minute${mins === 1 ? '' : 's'}`;
-};
-
-const loadStoredContact = (): StoredContact | null => {
-  if (typeof window === 'undefined') return null;
-  try {
-    const raw = window.localStorage.getItem(CONTACT_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as StoredContact;
-    if (!parsed?.method || !parsed.value || !parsed.storedAt) {
-      return null;
-    }
-    if (Date.now() - parsed.storedAt > CONTACT_TTL_MS) {
-      window.localStorage.removeItem(CONTACT_STORAGE_KEY);
-      return null;
-    }
-    return parsed;
-  } catch {
-    return null;
-  }
-};
-
-const saveStoredContact = (contact: StoredContact) => {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(CONTACT_STORAGE_KEY, JSON.stringify(contact));
-  } catch {
-    // Ignore storage failures (private browsing or disabled storage).
-  }
-};
-
-const formatStoredContactLabel = (contact: StoredContact) => {
-  if (contact.method === 'phone') {
-    const digits = normalizePhone(contact.value);
-    if (!digits) return 'phone on file';
-    const tail = digits.slice(-4);
-    return tail ? `ending in ${tail}` : digits;
-  }
-  const normalized = contact.value.trim().toLowerCase();
-  const [user, domain] = normalized.split('@');
-  if (!domain) return normalized;
-  if (!user) return `@${domain}`;
-  const maskedUser =
-    user.length <= 2 ? `${user[0]}*` : `${user[0]}***${user[user.length - 1]}`;
-  return `${maskedUser}@${domain}`;
-};
-
-const Chat: React.FC = () => {
+export const useChatFlow = () => {
   const {
     salon,
     services,
@@ -125,17 +33,14 @@ const Chat: React.FC = () => {
   const [step, setStep] = useState<ChatStep>('welcome');
   const [selectedService, setSelectedService] = useState<string | null>(null);
   const [selectedBarber, setSelectedBarber] = useState<string | null>(null);
-  const [clientPhone, setClientPhone] = useState<string>('');
-  const [clientEmail, setClientEmail] = useState<string>('');
-  const [joinMethod, setJoinMethod] = useState<'phone' | 'email' | null>(null);
+  const [clientPhone, setClientPhone] = useState('');
+  const [clientEmail, setClientEmail] = useState('');
+  const [joinMethod, setJoinMethod] = useState<ContactMethod | null>(null);
   const [joinedClientId, setJoinedClientId] = useState<string | null>(null);
   const [verificationCode, setVerificationCode] = useState<string | null>(null);
-  const [verificationMethod, setVerificationMethod] = useState<'phone' | 'email' | null>(null);
-  const [verificationTarget, setVerificationTarget] = useState<string>('');
-  const [pendingJoinContact, setPendingJoinContact] = useState<{
-    method: 'phone' | 'email';
-    value: string;
-  } | null>(null);
+  const [verificationMethod, setVerificationMethod] = useState<ContactMethod | null>(null);
+  const [verificationTarget, setVerificationTarget] = useState('');
+  const [pendingJoinContact, setPendingJoinContact] = useState<PendingContact | null>(null);
   const [pendingDuplicateMatches, setPendingDuplicateMatches] = useState<QueueClient[]>([]);
   const [pendingLeaveMatches, setPendingLeaveMatches] = useState<QueueClient[]>([]);
   const [savedContact, setSavedContact] = useState<StoredContact | null>(null);
@@ -188,7 +93,7 @@ const Chat: React.FC = () => {
     setMessages(prev => [...prev, newMessage]);
   };
 
-  const sendVerificationCode = (method: 'phone' | 'email', destination: string) => {
+  const sendVerificationCode = (method: ContactMethod, destination: string) => {
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     setVerificationMethod(method);
     setVerificationTarget(destination);
@@ -196,9 +101,6 @@ const Chat: React.FC = () => {
     console.info(`Verification code for ${method} ${destination}: ${code}`);
     return code;
   };
-
-  const formatJoinMethod = (method: 'phone' | 'email') =>
-    method === 'phone' ? 'phone number' : 'email';
 
   const getServiceName = (serviceKey: string) =>
     services.find(service => service.key === serviceKey)?.name ?? serviceKey;
@@ -217,9 +119,8 @@ const Chat: React.FC = () => {
   const providerLabelTitle = providerLabel[0].toUpperCase() + providerLabel.slice(1);
   const fullAddress = `${salon.address}, ${salon.city}`;
 
-  const rememberContact = (method: 'phone' | 'email', value: string) => {
-    const normalized =
-      method === 'phone' ? normalizePhone(value) : value.trim().toLowerCase();
+  const rememberContact = (method: ContactMethod, value: string) => {
+    const normalized = method === 'phone' ? normalizePhone(value) : value.trim().toLowerCase();
     if (!normalized) return;
     const stored = { method, value: normalized, storedAt: Date.now() };
     saveStoredContact(stored);
@@ -230,32 +131,6 @@ const Chat: React.FC = () => {
     setOffDutyMatches([]);
     setPendingOffDutyEntry(null);
     setPendingOffDutyMode(null);
-  };
-
-  const copyTextToClipboard = async (text: string) => {
-    if (navigator.clipboard?.writeText) {
-      try {
-        await navigator.clipboard.writeText(text);
-        return true;
-      } catch {
-        // Fall through to manual copy.
-      }
-    }
-
-    try {
-      const textarea = document.createElement('textarea');
-      textarea.value = text;
-      textarea.setAttribute('readonly', '');
-      textarea.style.position = 'fixed';
-      textarea.style.top = '-9999px';
-      document.body.appendChild(textarea);
-      textarea.select();
-      const success = document.execCommand('copy');
-      document.body.removeChild(textarea);
-      return success;
-    } catch {
-      return false;
-    }
   };
 
   const handleCopyAddress = async () => {
@@ -293,7 +168,7 @@ const Chat: React.FC = () => {
     });
   };
 
-  const startVerification = (method: 'phone' | 'email', value: string) => {
+  const startVerification = (method: ContactMethod, value: string) => {
     rememberContact(method, value);
     const code = sendVerificationCode(method, value);
     if (method === 'phone') {
@@ -317,14 +192,11 @@ const Chat: React.FC = () => {
       value: service.key
     }));
 
-    addBotMessage(
-      intro ?? `Welcome to ${salon.name}!\n\nHow can we help you today?`,
-      [
-        ...serviceOptions,
-        { label: 'Check my queue position', value: 'check-position' },
-        { label: 'Leave the queue', value: 'leave-queue' }
-      ]
-    );
+    addBotMessage(intro ?? `Welcome to ${salon.name}!\n\nHow can we help you today?`, [
+      ...serviceOptions,
+      { label: 'Check my queue position', value: 'check-position' },
+      { label: 'Leave the queue', value: 'leave-queue' }
+    ]);
     setStep('welcome');
   };
 
@@ -391,14 +263,9 @@ const Chat: React.FC = () => {
             const queueCount = getQueueCount(value);
 
             addBotMessage(
-              `Great choice! ${barber?.name} is ready for you.
-
-` +
-                `Current wait: ~${formatWaitTime(waitTime)}
-` +
-                `People in queue: ${queueCount}
-
-` +
+              `Great choice! ${barber?.name} is ready for you.\n\n` +
+                `Current wait: ~${formatWaitTime(waitTime)}\n` +
+                `People in queue: ${queueCount}\n\n` +
                 `Would you like to join the queue?`,
               [
                 { label: 'Yes, join the queue', value: 'join' },
@@ -411,13 +278,10 @@ const Chat: React.FC = () => {
 
         case 'confirm-join':
           if (value === 'join') {
-            addBotMessage(
-              "How would you like to be notified when it's almost your turn?",
-              [
-                { label: 'Text message (SMS)', value: 'phone' },
-                { label: 'Email', value: 'email' }
-              ]
-            );
+            addBotMessage("How would you like to be notified when it's almost your turn?", [
+              { label: 'Text message (SMS)', value: 'phone' },
+              { label: 'Email', value: 'email' }
+            ]);
             setStep('select-notification');
           } else {
             if (selectedService) {
@@ -455,11 +319,7 @@ const Chat: React.FC = () => {
             }
             const code = sendVerificationCode(verificationMethod, verificationTarget);
             addBotMessage(
-              `A new code has been sent to ${verificationTarget}.
-
-Enter it below to continue.
-
-Demo code: ${code}`
+              `A new code has been sent to ${verificationTarget}.\n\nEnter it below to continue.\n\nDemo code: ${code}`
             );
             setShowInput(true);
             setInputType('tel');
@@ -673,9 +533,7 @@ Demo code: ${code}`
         ? 'How would you like to look up your spot in line?'
         : 'How would you like to find your queue entry?';
     const hint = joinMethod
-      ? `
-
-Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
+      ? `\n\nPlease use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
       : '';
     const lookupOptions = joinMethod
       ? [
@@ -709,15 +567,11 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
     setVerificationTarget('');
     setPendingJoinContact(null);
     setPendingDuplicateMatches([]);
-    setPendingDuplicateMatches([]);
     setPendingLeaveMatches([]);
     resetOffDutyState();
     setShowInput(false);
     showWelcomeOptions();
   };
-
-  const barberSupportsService = (barber: Barber, service: string) =>
-    !barber.services || barber.services.includes(service);
 
   const showBarberSelection = (service: string) => {
     const serviceLabel = getServiceName(service).toLowerCase();
@@ -735,9 +589,7 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
     if (availableBarbers.length === 0) {
       addBotMessage(
         `Sorry, no ${providerLabelPlural} are available for ${serviceLabel} right now.`,
-        [
-          { label: 'Go back', value: 'back' }
-        ]
+        [{ label: 'Go back', value: 'back' }]
       );
       setStep('select-barber');
       return;
@@ -752,9 +604,7 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
     }));
 
     addBotMessage(
-      `Here are our available ${providerLabelPlural} for ${serviceLabel}:
-
-` +
+      `Here are our available ${providerLabelPlural} for ${serviceLabel}:\n\n` +
         `Please select who you'd like to see:`,
       [...barberOptions, { label: 'Go back', value: 'back' }]
     );
@@ -821,10 +671,10 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
       };
     });
 
-    addBotMessage(
-      'We found multiple off-duty queue entries. Which one should we move?',
-      [...entryOptions, { label: 'Go back', value: 'back' }]
-    );
+    addBotMessage('We found multiple off-duty queue entries. Which one should we move?', [
+      ...entryOptions,
+      { label: 'Go back', value: 'back' }
+    ]);
     setStep('off-duty-entry');
   };
 
@@ -880,10 +730,10 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
       value: barber.id
     }));
 
-    addBotMessage(
-      `Select a different ${providerLabel} for ${serviceName}:`,
-      [...providerOptions, { label: 'Go back', value: 'back' }]
-    );
+    addBotMessage(`Select a different ${providerLabel} for ${serviceName}:`, [
+      ...providerOptions,
+      { label: 'Go back', value: 'back' }
+    ]);
     setStep('off-duty-provider');
   };
 
@@ -980,7 +830,7 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
 
     setTimeout(() => {
       if (step === 'enter-phone' || step === 'enter-email') {
-        const method: 'phone' | 'email' = step === 'enter-phone' ? 'phone' : 'email';
+        const method: ContactMethod = step === 'enter-phone' ? 'phone' : 'email';
         rememberContact(method, value);
         const matches = findMatches(value, method);
         if (matches.length > 0) {
@@ -1033,16 +883,16 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
         }
         void completeQueueJoin();
       } else if (step === 'check-phone' || step === 'check-email') {
-        const kind: 'phone' | 'email' = step === 'check-phone' ? 'phone' : 'email';
+        const kind: ContactMethod = step === 'check-phone' ? 'phone' : 'email';
         handleCheckPositionLookup(value, kind);
       } else if (step === 'leave-phone' || step === 'leave-email') {
-        const kind: 'phone' | 'email' = step === 'leave-phone' ? 'phone' : 'email';
+        const kind: ContactMethod = step === 'leave-phone' ? 'phone' : 'email';
         handleLeaveQueueLookup(value, kind);
       }
     }, 500);
   };
 
-  const findMatches = (value: string, kind: 'phone' | 'email') => {
+  const findMatches = (value: string, kind: ContactMethod) => {
     if (kind === 'phone') {
       const target = normalizePhone(value);
       return queue.filter(
@@ -1055,14 +905,14 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
     );
   };
 
-  const handleCheckPositionLookup = (value: string, kind: 'phone' | 'email') => {
+  const handleCheckPositionLookup = (value: string, kind: ContactMethod) => {
     rememberContact(kind, value);
     const matches = findMatches(value, kind);
 
     if (matches.length === 0) {
       resetOffDutyState();
       addBotMessage(
-        "We could not find an active queue entry with that contact. Want to try again?",
+        'We could not find an active queue entry with that contact. Want to try again?',
         [
           { label: 'Use a different contact', value: 'use-different-contact-check' },
           { label: 'Start over', value: 'restart' }
@@ -1121,19 +971,16 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
     setStep('cancelled');
   };
 
-  const handleLeaveQueueLookup = (value: string, kind: 'phone' | 'email') => {
+  const handleLeaveQueueLookup = (value: string, kind: ContactMethod) => {
     rememberContact(kind, value);
     const matches = findMatches(value, kind);
 
     if (matches.length === 0) {
       resetOffDutyState();
-      addBotMessage(
-        "We could not find an active queue entry with that contact.",
-        [
-          { label: 'Use a different contact', value: 'use-different-contact-leave' },
-          { label: 'Start over', value: 'restart' }
-        ]
-      );
+      addBotMessage('We could not find an active queue entry with that contact.', [
+        { label: 'Use a different contact', value: 'use-different-contact-leave' },
+        { label: 'Start over', value: 'restart' }
+      ]);
       setStep('cancelled');
       return;
     }
@@ -1226,21 +1073,12 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
     setPendingJoinContact(null);
 
     addBotMessage(
-      `You're in the queue!
-
-` +
-        `${providerLabelTitle}: ${barber?.name}
-` +
-        `Service: ${selectedService ? getServiceName(selectedService) : 'Service'}
-` +
-        `Position: #${queuePosition}
-` +
-        `Estimated wait: ~${formatWaitTime(waitTime)}
-
-` +
-        `We'll notify you 45 minutes before your turn.
-
-` +
+      `You're in the queue!\n\n` +
+        `${providerLabelTitle}: ${barber?.name}\n` +
+        `Service: ${selectedService ? getServiceName(selectedService) : 'Service'}\n` +
+        `Position: #${queuePosition}\n` +
+        `Estimated wait: ~${formatWaitTime(waitTime)}\n\n` +
+        `We'll notify you 45 minutes before your turn.\n\n` +
         `Address: ${fullAddress}`,
       [
         { label: 'Copy address', value: 'copy-address' },
@@ -1259,46 +1097,16 @@ Please use the same ${formatJoinMethod(joinMethod)} you used to join the queue.`
   }, [messages]);
   const latestMessageId = messages[messages.length - 1]?.id ?? null;
 
-  return (
-    <div className="min-h-screen bg-background">
-      <ChatHeader />
-
-      <div className="max-w-lg mx-auto pt-28 pb-24 px-4">
-        {messages.map(message => (
-          <div key={message.id}>
-            <ChatBubble message={message.text} isBot={message.isBot} />
-            {message.options && message.isBot && (
-              <div className="flex flex-col gap-2 mb-4 pl-2">
-                {message.options.map((option, idx) => (
-                  <ChatOption
-                    key={idx}
-                    label={option.label}
-                    sublabel={option.sublabel}
-                    variant={option.sublabel ? 'barber' : 'default'}
-                    disabled={
-                      showInput
-                        ? message.id !== latestMessageId
-                        : message.id !== latestOptionsMessageId
-                    }
-                    onClick={() => handleOptionClick(option.value, option.label)}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        ))}
-        <div ref={messagesEndRef} />
-      </div>
-
-      <ChatInput
-        visible={showInput}
-        type={inputType}
-        placeholder={inputPlaceholder}
-        onSubmit={handleInputSubmit}
-        onCancel={handleInputCancel}
-      />
-    </div>
-  );
+  return {
+    messages,
+    showInput,
+    inputType,
+    inputPlaceholder,
+    messagesEndRef,
+    latestOptionsMessageId,
+    latestMessageId,
+    handleOptionClick,
+    handleInputSubmit,
+    handleInputCancel
+  };
 };
-
-export default Chat;

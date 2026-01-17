@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { useQueue } from '../../context/QueueContext';
+import { useQueue } from '../../../context/QueueContext';
 
 export const ChatHeader: React.FC = () => {
   const { salon } = useQueue();
@@ -92,9 +92,7 @@ export const ChatHeader: React.FC = () => {
               </button>
             </div>
             <div className="mt-4 flex flex-wrap gap-2 text-xs font-semibold text-foreground">
-              <span className="rounded-full bg-background/80 px-3 py-1">
-                {salon.workingDays}
-              </span>
+              <span className="rounded-full bg-background/80 px-3 py-1">{salon.workingDays}</span>
               <span className="rounded-full bg-background/80 px-3 py-1">
                 {salon.opensAt} - {salon.closesAt}
               </span>

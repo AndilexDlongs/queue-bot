@@ -36,8 +36,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
   if (!visible) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = (event: React.FormEvent) => {
+    event.preventDefault();
     if (value.trim()) {
       inputRef.current?.blur();
       onSubmit(value.trim());
@@ -69,7 +69,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           autoCorrect="off"
           enterKeyHint="send"
           value={value}
-          onChange={e => setValue(e.target.value)}
+          onChange={event => setValue(event.target.value)}
           placeholder={placeholder}
           className="flex-1 rounded-lg border border-border/70 bg-white/80 px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-primary/40"
         />
